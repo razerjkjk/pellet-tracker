@@ -280,11 +280,103 @@ function useInvalidate() {
   return () => qc.invalidateQueries({ queryKey: ["pellet-data"] });
 }
 
+type AuthResult = ApiResponse<typeof api, "signIn">;
+
+function useMe() {
+  return useQuery({
+    queryKey: ["me"],
+    queryFn: () => api.getMe({}),
+    staleTime: 60_000,
+  });
+}
+
+function AuthView({ onAuthed }: { onAuthed: () => void }) {
+  const [mode, setMode] = useState<"in" | "up">("in");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const auth = useMutation({
+    mutationFn: async (): Promise<AuthResult> =>
+      mode === "up"
+        ? api.signUp({ email, name, password })
+        : api.signIn({ email, password }),
+    onSuccess: (r) => {
+      if (r.ok) { onAuthed(); return; }
+      setError(r.error ?? "Bummer — that didn't go through. Try again, baby.");
+    },
+    onError: () => setError("Bummer — the dance floor didn't answer. Try again, baby."),
+  });
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    if (mode === "up" && !name.trim()) {
+      setError("Give us a first name so we know who's groovin'.");
+      return;
+    }
+    if (mode === "up" && password.length < 8) {
+      setError("Pick a password with at least 8 characters, cool cat.");
+      return;
+    }
+    auth.mutate();
+  }
+
+  return (
+    <section aria-label="Sign in or create your account" className="mt-4 rounded-2xl border border-[#ffd23f]/50 bg-black/55 p-5 backdrop-blur-sm">
+      <p className="display text-sm font-semibold uppercase tracking-widest text-[#ffd23f]">Your own dance floor</p>
+      <h2 className="display mt-1 text-2xl font-semibold leading-tight">{mode === "up" ? "Create your account, baby" : "Sign in to your stash"}</h2>
+      <p className="mt-1 text-sm text-white/80">
+        Every dancer gets their own account — your stoves, purchases, and burn logs belong to you and only you.
+        New here? Your account starts with the two factory stoves and their maintenance grooves, ready to boogie.
+      </p>
+      <form onSubmit={submit} className="mt-4 space-y-3">
+        {mode === "up" && (
+          <Field label="First name — what should we call you?">
+            <input aria-label="First name" type="text" className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="Alex" autoComplete="given-name" required />
+          </Field>
+        )}
+        <Field label="Email">
+          <input aria-label="Email" type="email" className={inputCls} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" required />
+        </Field>
+        <Field label="Password">
+          <input aria-label="Password" type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={mode === "up" ? "At least 8 characters" : "Your password"} autoComplete={mode === "up" ? "new-password" : "current-password"} required minLength={mode === "up" ? 8 : undefined} />
+        </Field>
+        {error && <p role="alert" className="rounded-lg bg-[#ff2e88] px-3 py-2 text-sm font-semibold">{error}</p>}
+        <button type="submit" className={btnPrimary} disabled={auth.isPending}>
+          {auth.isPending ? "Spinnin' the record…" : mode === "up" ? "Create my account" : "Sign in, cool cat"}
+        </button>
+      </form>
+      <p className="mt-3 text-sm text-white/80">
+        {mode === "up" ? (
+          <>Already got an account? <button type="button" className="font-semibold text-[#ffd23f] underline" onClick={() => { setMode("in"); setError(""); }}>Sign in instead</button></>
+        ) : (
+          <>New to the dance floor? <button type="button" className="font-semibold text-[#ffd23f] underline" onClick={() => { setMode("up"); setError(""); }}>Create an account</button></>
+        )}
+      </p>
+    </section>
+  );
+}
+
 export function App() {
   const today = useMemo(() => todayLocal(), []);
   const invalidate = useInvalidate();
-  const dataQ = useQuery({ queryKey: ["pellet-data", today], queryFn: () => api.getData({ today }) });
+  const qc = useQueryClient();
+  const me = useMe();
+  // The tracker data only loads once an account is signed in — every
+  // account sees only its own stoves, purchases, and burn logs.
+  const dataQ = useQuery({ queryKey: ["pellet-data", today], queryFn: () => api.getData({ today }), enabled: !!me.data?.user });
   const data = dataQ.data;
+
+  function handleAuthed() {
+    void qc.invalidateQueries({ queryKey: ["me"] });
+    invalidate();
+  }
+  const signOut = useMutation({
+    mutationFn: () => api.signOut({}),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["me"] }); invalidate(); },
+  });
 
   const [burnStove, setBurnStove] = useState<string>("");
   const [burnDate, setBurnDate] = useState(today);
@@ -357,6 +449,12 @@ export function App() {
           <button type="button" aria-pressed={playing} className={btnGhost} onClick={toggleGroove}>
             <span className="flex items-center gap-2"><Equalizer playing={playing} />{playing ? "Stop the synth groove" : "Play the synth groove"}</span>
           </button>
+          {me.data?.user && (
+            <>
+              <span className="text-xs text-[#ffe9a8]">Groovin&rsquo; as {me.data.user.name}</span>
+              <button type="button" className={btnGhost} onClick={() => signOut.mutate()} disabled={signOut.isPending}>Sign out</button>
+            </>
+          )}
         </div>
         {grooveMsg && <p role="status" className="mt-2 text-center text-sm text-[#ffe9a8]">{grooveMsg}</p>}
         {/* Theme song: the real Stayin' Alive, streamed from the official video */}
@@ -401,6 +499,12 @@ export function App() {
             </div>
           )}
         </section>
+        {/* Accounts: the tracker only shows once you're signed in — every
+            account sees only its own stoves, purchases, and burn logs. */}
+        {me.isPending && <p className="mt-4 text-center text-sm text-[#ffe9a8]">Warmin&rsquo; up the dance floor… checkin&rsquo; who&rsquo;s groovin&rsquo;…</p>}
+        {!me.isPending && !me.data?.user && <AuthView onAuthed={handleAuthed} />}
+        {me.data?.user && (
+          <>
         {/* Hero: supply at a glance */}
         <section aria-label="Supply at a glance" className="mt-4 rounded-2xl border border-[#ff2e88]/40 bg-[#1d0b36]/90 p-5 text-white shadow-[0_0_32px_rgba(255,46,136,0.25)] backdrop-blur-sm sm:p-6">
           <p className="display text-sm font-semibold uppercase tracking-widest text-[#ffd23f]">Pellet supply &bull; Can you dig it?</p>
@@ -682,6 +786,8 @@ export function App() {
             })}
           </ul>
         </section>
+          </>
+        )}
         <p className="mt-5 text-center text-xs text-[#ffe9a8]/90">Stayin&rsquo; warm, stayin&rsquo; groovy — every number here comes only from what you lay down in this app. Can you dig it? ✦</p>
       </main>
     </div>

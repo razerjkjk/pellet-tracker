@@ -2,9 +2,12 @@
 //
 // Serves the built client from `dist/client` and dispatches plain HTTP
 // POSTs to `./actions` (`{action, args}`) to the handlers in
-// `./actions.ts`. There are no accounts, no sessions, and no uploads in
-// this app: every visitor shares the one tracker database, exactly like
-// the original single-user Muse app.
+// `./actions.ts`. Accounts are email + password with argon2id hashes and
+// HttpOnly cookie sessions (see `./auth.ts`); every account's stoves,
+// purchases, burn logs, and counts belong to that account only. The
+// factory catalog (2 stove models, their maintenance tasks, and the
+// factory troubleshooting items) is seeded into each new account at
+// signup from the migration templates.
 //
 // Configuration (environment variables):
 //   PORT           — HTTP port to listen on (default 3000; hosts like
@@ -15,6 +18,9 @@
 //                    container is replaced.
 //   CLIENT_DIR     — built client directory (default dist/client).
 //   MIGRATIONS_DIR — drizzle migrations directory (default drizzle/).
+//   SESSION_COOKIE_SECURE — set to "1" when the app is served over HTTPS
+//                    so the session cookie is only sent over secure
+//                    connections. Leave unset for plain-HTTP local runs.
 //
 // Run with:  bun run start        (after `bun run build`)
 // Or build a bundle first: bun run build:server, then `bun dist/server.js`.
@@ -22,6 +28,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { Actions, type ActionContext } from "./actions";
+import { sessionTokenFromCookie, userFromSession } from "./auth";
 import { createDb, runMigrations } from "./db";
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -59,11 +66,22 @@ type AnyAction = {
   handler: (ctx: ActionContext, args: never) => Promise<unknown>;
 };
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
+function clientIp(req: Request, server: { requestIP: (req: Request) => { address: string } | null }): string {
+  const forwarded = req.headers.get("x-forwarded-for");
+  const first = forwarded?.split(",")[0]?.trim();
+  if (first) return first;
+  return server.requestIP(req)?.address ?? "unknown";
+}
+
+function json(data: unknown, status = 200, cookies: string[] = []): Response {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  const res = new Response(JSON.stringify(data), { status, headers });
+  if (cookies.length > 0) {
+    const withCookies = new Headers(res.headers);
+    for (const cookie of cookies) withCookies.append("set-cookie", cookie);
+    return new Response(res.body, { status: res.status, headers: withCookies });
+  }
+  return res;
 }
 
 async function handleActions(req: Request, ctx: ActionContext): Promise<Response> {
@@ -81,21 +99,22 @@ async function handleActions(req: Request, ctx: ActionContext): Promise<Response
   const def = Actions[action as keyof typeof Actions] as unknown as AnyAction;
   const parsed = def.request.safeParse(args ?? {});
   if (!parsed.success) {
-    return json({ ok: false, error: "That request was not valid." }, 400);
+    return json({ ok: false, error: "That request was not valid." }, 400, ctx.cookies);
   }
   try {
     const result = await def.handler(ctx, parsed.data as never);
     const checked = def.response.safeParse(result);
     if (!checked.success) {
       console.error(`[actions] bad response for ${action}`);
-      return json({ error: "The server returned an unexpected result." }, 500);
+      return json({ error: "The server returned an unexpected result." }, 500, ctx.cookies);
     }
-    return json(checked.data, 200);
+    return json(checked.data, 200, ctx.cookies);
   } catch (err) {
     console.error(`[actions] ${action} failed:`, err);
     return json(
       { error: err instanceof Error ? err.message : "The server could not do that." },
       500,
+      ctx.cookies,
     );
   }
 }
@@ -114,7 +133,7 @@ function serveFile(base: string, rel: string): Response | null {
 const server = Bun.serve({
   port: PORT,
   hostname: "0.0.0.0",
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
 
     if (url.pathname === "/health") {
@@ -125,7 +144,17 @@ const server = Bun.serve({
       if (req.method !== "POST") {
         return json({ error: "Use POST for actions." }, 405);
       }
-      const ctx: ActionContext = { db };
+      // Resolve the signed-in account from the session cookie before any
+      // action runs, so every handler can trust ctx.user.
+      const sessionToken = sessionTokenFromCookie(req.headers.get("cookie"));
+      const user = await userFromSession(db, sessionToken);
+      const ctx: ActionContext = {
+        db,
+        user,
+        sessionToken,
+        ip: clientIp(req, server),
+        cookies: [],
+      };
       return handleActions(req, ctx);
     }
 

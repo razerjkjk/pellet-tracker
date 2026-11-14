@@ -12,11 +12,15 @@ This is a standalone, host-ready copy of the app. It runs on any host
 that can run [Bun](https://bun.sh) with a SQLite file — no Muse/Hatch
 runtime, no proprietary SDK.
 
-**One shared tracker, no accounts.** There is no sign-in here: everyone
-who opens the link sees and edits the same stoves, purchases, and burn
-logs. That matches the original single-user app. If strangers will use
-it together and each need their own supply, accounts would have to be
-added first — see "What still needs doing".
+**Everyone gets their own account.** Sign up with an email and password
+and your stoves, purchases, burn logs, bag counts, and maintenance tasks
+belong to you and only you — another account can't see, edit, or delete
+them. The factory catalog (the 2 stove models, their maintenance tasks,
+and the 30 factory troubleshooting items) is shared read-only content
+from the manuals: every new account starts with that same seeded
+catalog and zero purchases, zero burn logs, and zero bags. There is no
+admin panel and no moderation — accounts and per-account data are the
+whole story.
 
 ## What starts in the database
 
@@ -82,6 +86,7 @@ Other scripts:
 | `DATABASE_PATH` | `./data/app.db` | SQLite file. **Put it on a persistent volume** (see below) or stoves and logs disappear when the container is replaced. |
 | `CLIENT_DIR` | `dist/client` | Built client directory. |
 | `MIGRATIONS_DIR` | `drizzle/` | Drizzle migration files. |
+| `SESSION_COOKIE_SECURE` | _(unset)_ | Set to `1` when the app is served over HTTPS so the session cookie is only sent over secure connections. Leave unset for plain-HTTP local runs. |
 
 Endpoints: `GET /` (the app), `GET /health` (returns `{"ok":true}` —
 use it as the host health check), `POST /actions` (`{action, args}`).
@@ -133,17 +138,20 @@ plain HTTP on `PORT`.
 
 ## What still needs doing before strangers use it together
 
-This pass made the app **host-ready** as far as the code goes. Three
+This pass made the app **host-ready** as far as the code goes. Two
 things are still open:
 
 1. **A hosting account + a persistent volume** (steps above). Without
    the volume, the SQLite file is wiped on every redeploy.
 2. **Backups** — back up the SQLite file on a schedule (the volume is
    the only copy).
-3. **Accounts, if each visitor needs their own supply.** Right now
-   everyone with the link shares one tracker. Adding email + password
-   accounts (like the Help Pay Bills public edition) would be a
-   separate build before announcing widely.
+
+Accounts are already in: email + password sign-up/sign-in with
+argon2id password hashes and HttpOnly cookie sessions, and every
+account's stoves, purchases, burn logs, and counts are isolated
+server-side. There is no password reset and no email verification yet —
+if someone forgets their password, the only recovery is deleting their
+account row (and their data) from the database directly.
 
 ## Notes and caveats
 

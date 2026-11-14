@@ -1,12 +1,32 @@
 import { z } from "zod";
 import type { Db } from "./db";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import * as schema from "./schema";
+import {
+  createSession,
+  clearSessionCookie,
+  deleteSession,
+  hashPassword,
+  isValidEmail,
+  sessionCookie,
+  verifyPassword,
+  type SessionStore,
+  type SessionUser,
+} from "./auth";
+import { allow, reset as resetLimit } from "./ratelimit";
 
 /** Everything an action handler needs. Provided by server.ts per request. */
 export interface ActionContext {
   /** Drizzle SQLite connection (already migrated on startup). */
   db: Db;
+  /** The signed-in user, resolved from the session cookie, or null. */
+  user: SessionUser | null;
+  /** Raw session token from the cookie (needed to sign out), or null. */
+  sessionToken: string | null;
+  /** Client IP, for rate limiting. */
+  ip: string;
+  /** Set-Cookie values to send back with the response. */
+  cookies: string[];
 }
 
 /**
@@ -43,6 +63,123 @@ function diffDays(from: string, to: string): number {
 function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
+
+/** Every data action needs a signed-in account. */
+function requireUser(ctx: ActionContext): SessionUser {
+  if (!ctx.user) throw new Error("Please sign in to see your tracker, cool cat.");
+  return ctx.user;
+}
+
+/** True when this stove belongs to this account. */
+async function ownStove(db: Db, userId: number, stoveId: number): Promise<boolean> {
+  const rows = await db
+    .select({ id: schema.stoves.id })
+    .from(schema.stoves)
+    .where(and(eq(schema.stoves.id, stoveId), eq(schema.stoves.userId, userId)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/** True when this maintenance task belongs to this account. */
+async function ownTask(db: Db, userId: number, taskId: number): Promise<boolean> {
+  const rows = await db
+    .select({ id: schema.maintenanceTasks.id })
+    .from(schema.maintenanceTasks)
+    .where(and(eq(schema.maintenanceTasks.id, taskId), eq(schema.maintenanceTasks.userId, userId)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/**
+ * Gives a brand-new account its starting catalog: a copy of the seeded
+ * factory rows (user_id NULL templates from the migrations) — the 2 stove
+ * models with their maintenance tasks and factory troubleshooting items —
+ * plus a settings row with the defaults. Purchases, burn logs, and
+ * adjustments start empty, so bags on hand start at 0. Runs inside the
+ * signup transaction so an account never lands half-seeded.
+ */
+async function seedCatalogForUser(
+  store: Pick<Db, "insert" | "select">,
+  userId: number,
+): Promise<void> {
+  await store.insert(schema.settings).values({
+    userId,
+    burnWindowDays: 30,
+    lowStockDays: 7,
+    safetyBags: 0,
+  });
+  const templates = await store
+    .select()
+    .from(schema.stoves)
+    .where(isNull(schema.stoves.userId));
+  const stoveMap = new Map<number, number>();
+  for (const t of templates) {
+    const rows = await store
+      .insert(schema.stoves)
+      .values({
+        userId,
+        name: t.name,
+        location: t.location,
+        manualUrl: t.manualUrl,
+        details: t.details,
+        factoryName: t.factoryName,
+        factoryPhone: t.factoryPhone,
+        factoryEmail: t.factoryEmail,
+        troubleshootingUrl: t.troubleshootingUrl,
+      })
+      .returning({ id: schema.stoves.id });
+    const row = rows[0];
+    if (row) stoveMap.set(t.id, row.id);
+  }
+  const tasks = await store
+    .select()
+    .from(schema.maintenanceTasks)
+    .where(isNull(schema.maintenanceTasks.userId));
+  for (const t of tasks) {
+    const newStoveId = stoveMap.get(t.stoveId);
+    if (newStoveId == null) continue;
+    await store.insert(schema.maintenanceTasks).values({
+      userId,
+      stoveId: newStoveId,
+      title: t.title,
+      intervalDays: t.intervalDays,
+      notes: t.notes,
+    });
+  }
+  const items = await store
+    .select()
+    .from(schema.troubleshootingItems)
+    .where(isNull(schema.troubleshootingItems.userId));
+  for (const it of items) {
+    const newStoveId = stoveMap.get(it.stoveId);
+    if (newStoveId == null) continue;
+    await store.insert(schema.troubleshootingItems).values({
+      userId,
+      stoveId: newStoveId,
+      category: it.category,
+      codeLabel: it.codeLabel,
+      title: it.title,
+      cause: it.cause,
+      fix: it.fix,
+      sortOrder: it.sortOrder,
+    });
+  }
+}
+
+const authResultSchema = z.object({
+  ok: z.boolean(),
+  error: z.string().optional(),
+  id: z.number().optional(),
+  user: z
+    .object({ id: z.number(), email: z.string(), name: z.string() })
+    .optional(),
+});
+
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+const SIGNUPS_PER_IP_PER_HOUR = 10;
+const SIGNIN_PER_IP_PER_15_MIN = 30;
+const SIGNIN_FAILURES_PER_EMAIL_PER_15_MIN = 10;
 
 const stoveOut = z.object({ id: z.number(), name: z.string(), location: z.string().nullable(), manualUrl: z.string().nullable(), details: z.string().nullable(), factoryName: z.string().nullable(), factoryPhone: z.string().nullable(), factoryEmail: z.string().nullable(), troubleshootingUrl: z.string().nullable() });
 const troubleshootingOut = z.object({
@@ -86,22 +223,139 @@ const dataResponse = z.object({
 });
 
 export const Actions = {
+  // ---- Accounts -------------------------------------------------------
+
+  getMe: defineAction({
+    description: "Returns the signed-in account, or null when signed out.",
+    request: z.object({}),
+    response: z.object({
+      user: z
+        .object({ id: z.number(), email: z.string(), name: z.string() })
+        .nullable(),
+    }),
+    async handler(ctx) {
+      return {
+        user: ctx.user
+          ? { id: ctx.user.id, email: ctx.user.email, name: ctx.user.name }
+          : null,
+      };
+    },
+  }),
+
+  signUp: defineAction({
+    description: "Creates an account with an email and password and signs in. The new account starts with the seeded factory catalog (2 stove models, their maintenance tasks, and the factory troubleshooting items) and zero purchases, burn logs, or bags.",
+    request: z.object({
+      email: z.string().trim().max(120),
+      name: z.string().trim().min(1).max(40),
+      password: z.string().min(8).max(128),
+    }),
+    response: authResultSchema,
+    async handler(ctx, args): Promise<z.infer<typeof authResultSchema>> {
+      if (!allow(`signup:ip:${ctx.ip}`, SIGNUPS_PER_IP_PER_HOUR, HOUR)) {
+        return { ok: false, error: "Too many accounts created from here. Try again later." };
+      }
+      const email = args.email.toLowerCase();
+      if (!isValidEmail(email)) {
+        return { ok: false, error: "Enter a valid email address." };
+      }
+      const existing = await ctx.db
+        .select({ id: schema.users.id })
+        .from(schema.users)
+        .where(eq(schema.users.email, email))
+        .limit(1);
+      if (existing.length > 0) {
+        return { ok: false, error: "An account with that email already exists. Sign in instead." };
+      }
+      const passwordHash = await hashPassword(args.password);
+      const name = args.name.trim();
+      // Account + seeded catalog + session in one transaction, so a new
+      // account never lands without its starting stoves and tasks.
+      const created = await ctx.db.transaction(async (tx) => {
+        const inserted = await tx
+          .insert(schema.users)
+          .values({ email, name, passwordHash })
+          .returning({ id: schema.users.id });
+        const row = inserted[0];
+        if (!row) throw new Error("The account could not be created. Try again.");
+        await seedCatalogForUser(tx as unknown as Pick<Db, "insert" | "select">, row.id);
+        const token = await createSession(tx as unknown as SessionStore, row.id);
+        return { id: row.id, token };
+      });
+      ctx.cookies.push(sessionCookie(created.token));
+      return {
+        ok: true,
+        id: created.id,
+        user: { id: created.id, email, name },
+      };
+    },
+  }),
+
+  signIn: defineAction({
+    description: "Signs in with an email and password.",
+    request: z.object({
+      email: z.string().trim().max(120),
+      password: z.string().min(1).max(128),
+    }),
+    response: authResultSchema,
+    async handler(ctx, args): Promise<z.infer<typeof authResultSchema>> {
+      const email = args.email.toLowerCase();
+      if (!allow(`signin:ip:${ctx.ip}`, SIGNIN_PER_IP_PER_15_MIN, 15 * MINUTE)) {
+        return { ok: false, error: "Too many sign-in attempts from here. Try again in a little while." };
+      }
+      if (!allow(`signin:email:${email}`, SIGNIN_FAILURES_PER_EMAIL_PER_15_MIN, 15 * MINUTE)) {
+        return { ok: false, error: "Too many sign-in attempts for this email. Try again in a little while." };
+      }
+      const wrong = { ok: false, error: "That email or password is not correct." } as const;
+      const rows = await ctx.db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.email, email))
+        .limit(1);
+      const user = rows[0];
+      if (!user) return wrong;
+      if (!(await verifyPassword(args.password, user.passwordHash))) return wrong;
+      resetLimit(`signin:email:${email}`);
+      const token = await createSession(ctx.db, user.id);
+      ctx.cookies.push(sessionCookie(token));
+      return {
+        ok: true,
+        id: user.id,
+        user: { id: user.id, email: user.email, name: user.name },
+      };
+    },
+  }),
+
+  signOut: defineAction({
+    description: "Signs out, ending the current session.",
+    request: z.object({}),
+    response: z.object({ ok: z.boolean() }),
+    async handler(ctx) {
+      if (ctx.sessionToken) {
+        await deleteSession(ctx.db, ctx.sessionToken);
+      }
+      ctx.cookies.push(clearSessionCookie());
+      return { ok: true };
+    },
+  }),
+
   getData: defineAction({
-    description: "Loads stoves, purchases, burn logs, adjustments, maintenance, settings, and the computed supply forecast.",
+    description: "Loads the signed-in account's stoves, purchases, burn logs, adjustments, maintenance, settings, and the computed supply forecast.",
     request: z.object({ today: dateString }),
     response: dataResponse,
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const today = args.today;
       const db = ctx.db;
+      const uid = user.id;
       const [stoveRows, purchaseRows, burnRows, adjRows, settingsRows, taskRows, logRows, troubleRows] = await Promise.all([
-        db.select().from(schema.stoves).orderBy(asc(schema.stoves.name)),
-        db.select().from(schema.purchases).orderBy(desc(schema.purchases.date), desc(schema.purchases.id)),
-        db.select().from(schema.burnLogs).orderBy(desc(schema.burnLogs.date), desc(schema.burnLogs.id)),
-        db.select().from(schema.adjustments).orderBy(desc(schema.adjustments.date), desc(schema.adjustments.id)),
-        db.select().from(schema.settings).where(eq(schema.settings.id, 1)).limit(1),
-        db.select().from(schema.maintenanceTasks).orderBy(asc(schema.maintenanceTasks.title)),
-        db.select().from(schema.maintenanceLogs).orderBy(desc(schema.maintenanceLogs.date), desc(schema.maintenanceLogs.id)),
-        db.select().from(schema.troubleshootingItems).orderBy(asc(schema.troubleshootingItems.sortOrder), asc(schema.troubleshootingItems.id)),
+        db.select().from(schema.stoves).where(eq(schema.stoves.userId, uid)).orderBy(asc(schema.stoves.name)),
+        db.select().from(schema.purchases).where(eq(schema.purchases.userId, uid)).orderBy(desc(schema.purchases.date), desc(schema.purchases.id)),
+        db.select().from(schema.burnLogs).where(eq(schema.burnLogs.userId, uid)).orderBy(desc(schema.burnLogs.date), desc(schema.burnLogs.id)),
+        db.select().from(schema.adjustments).where(eq(schema.adjustments.userId, uid)).orderBy(desc(schema.adjustments.date), desc(schema.adjustments.id)),
+        db.select().from(schema.settings).where(eq(schema.settings.userId, uid)).limit(1),
+        db.select().from(schema.maintenanceTasks).where(eq(schema.maintenanceTasks.userId, uid)).orderBy(asc(schema.maintenanceTasks.title)),
+        db.select().from(schema.maintenanceLogs).where(eq(schema.maintenanceLogs.userId, uid)).orderBy(desc(schema.maintenanceLogs.date), desc(schema.maintenanceLogs.id)),
+        db.select().from(schema.troubleshootingItems).where(eq(schema.troubleshootingItems.userId, uid)).orderBy(asc(schema.troubleshootingItems.sortOrder), asc(schema.troubleshootingItems.id)),
       ]);
       const settingsRow = settingsRows[0];
       const settings = {
@@ -236,8 +490,9 @@ export const Actions = {
     request: z.object({ name: z.string().trim().min(1).max(80), location: optText, manualUrl: optText, details: optText }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      const rows = await db.insert(schema.stoves).values({ name: args.name.trim(), location: clean(args.location), manualUrl: clean(args.manualUrl), details: clean(args.details) }).returning({ id: schema.stoves.id });
+      const rows = await db.insert(schema.stoves).values({ userId: user.id, name: args.name.trim(), location: clean(args.location), manualUrl: clean(args.manualUrl), details: clean(args.details) }).returning({ id: schema.stoves.id });
       const row = rows[0];
       if (!row) throw new Error("addStove: insert returned no rows");
       return { id: row.id };
@@ -249,8 +504,10 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive(), name: z.string().trim().min(1).max(80), location: optText, manualUrl: optText, details: optText }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      await db.update(schema.stoves).set({ name: args.name.trim(), location: clean(args.location), manualUrl: clean(args.manualUrl), details: clean(args.details) }).where(eq(schema.stoves.id, args.id));
+      if (!(await ownStove(db, user.id, args.id))) return { ok: false };
+      await db.update(schema.stoves).set({ name: args.name.trim(), location: clean(args.location), manualUrl: clean(args.manualUrl), details: clean(args.details) }).where(and(eq(schema.stoves.id, args.id), eq(schema.stoves.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -260,15 +517,19 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: z.object({ ok: z.boolean(), message: z.string().nullable() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
+      if (!(await ownStove(db, user.id, args.id))) {
+        return { ok: false, message: "That stove isn't on your account, cool cat." };
+      }
       const [burns, tasks] = await Promise.all([
-        db.select({ id: schema.burnLogs.id }).from(schema.burnLogs).where(eq(schema.burnLogs.stoveId, args.id)).limit(1),
-        db.select({ id: schema.maintenanceTasks.id }).from(schema.maintenanceTasks).where(eq(schema.maintenanceTasks.stoveId, args.id)).limit(1),
+        db.select({ id: schema.burnLogs.id }).from(schema.burnLogs).where(and(eq(schema.burnLogs.stoveId, args.id), eq(schema.burnLogs.userId, user.id))).limit(1),
+        db.select({ id: schema.maintenanceTasks.id }).from(schema.maintenanceTasks).where(and(eq(schema.maintenanceTasks.stoveId, args.id), eq(schema.maintenanceTasks.userId, user.id))).limit(1),
       ]);
       if (burns.length > 0 || tasks.length > 0) {
         return { ok: false, message: "Whoa, cool cat — this stove still has burn logs or maintenance grooves. Ditch those first, or keep the stove groovin'." };
       }
-      await db.delete(schema.stoves).where(eq(schema.stoves.id, args.id));
+      await db.delete(schema.stoves).where(and(eq(schema.stoves.id, args.id), eq(schema.stoves.userId, user.id)));
       return { ok: true, message: null };
     },
   }),
@@ -282,9 +543,10 @@ export const Actions = {
     }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
       const rows = await db.insert(schema.purchases).values({
-        date: args.date, bags: args.bags, brand: clean(args.brand), store: clean(args.store),
+        userId: user.id, date: args.date, bags: args.bags, brand: clean(args.brand), store: clean(args.store),
         totalCostCents: args.totalCostCents ?? null, lbsPerBag: args.lbsPerBag ?? null, notes: clean(args.notes),
       }).returning({ id: schema.purchases.id });
       const row = rows[0];
@@ -302,11 +564,14 @@ export const Actions = {
     }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
+      const found = await db.select({ id: schema.purchases.id }).from(schema.purchases).where(and(eq(schema.purchases.id, args.id), eq(schema.purchases.userId, user.id))).limit(1);
+      if (found.length === 0) return { ok: false };
       await db.update(schema.purchases).set({
         date: args.date, bags: args.bags, brand: clean(args.brand), store: clean(args.store),
         totalCostCents: args.totalCostCents ?? null, lbsPerBag: args.lbsPerBag ?? null, notes: clean(args.notes),
-      }).where(eq(schema.purchases.id, args.id));
+      }).where(and(eq(schema.purchases.id, args.id), eq(schema.purchases.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -316,8 +581,9 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      await db.delete(schema.purchases).where(eq(schema.purchases.id, args.id));
+      await db.delete(schema.purchases).where(and(eq(schema.purchases.id, args.id), eq(schema.purchases.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -327,9 +593,13 @@ export const Actions = {
     request: z.object({ date: dateString, stoveId: z.number().int().positive().nullable().optional(), bags: z.number().positive().max(1000), note: optText }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
+      if (args.stoveId != null && !(await ownStove(db, user.id, args.stoveId))) {
+        throw new Error("That stove isn't on your account, cool cat.");
+      }
       const rows = await db.insert(schema.burnLogs).values({
-        date: args.date, stoveId: args.stoveId ?? null, bags: args.bags, note: clean(args.note),
+        userId: user.id, date: args.date, stoveId: args.stoveId ?? null, bags: args.bags, note: clean(args.note),
       }).returning({ id: schema.burnLogs.id });
       const row = rows[0];
       if (!row) throw new Error("addBurn: insert returned no rows");
@@ -342,10 +612,16 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive(), date: dateString, stoveId: z.number().int().positive().nullable().optional(), bags: z.number().positive().max(1000), note: optText }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
+      const found = await db.select({ id: schema.burnLogs.id }).from(schema.burnLogs).where(and(eq(schema.burnLogs.id, args.id), eq(schema.burnLogs.userId, user.id))).limit(1);
+      if (found.length === 0) return { ok: false };
+      if (args.stoveId != null && !(await ownStove(db, user.id, args.stoveId))) {
+        throw new Error("That stove isn't on your account, cool cat.");
+      }
       await db.update(schema.burnLogs).set({
         date: args.date, stoveId: args.stoveId ?? null, bags: args.bags, note: clean(args.note),
-      }).where(eq(schema.burnLogs.id, args.id));
+      }).where(and(eq(schema.burnLogs.id, args.id), eq(schema.burnLogs.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -355,8 +631,9 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      await db.delete(schema.burnLogs).where(eq(schema.burnLogs.id, args.id));
+      await db.delete(schema.burnLogs).where(and(eq(schema.burnLogs.id, args.id), eq(schema.burnLogs.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -366,8 +643,9 @@ export const Actions = {
     request: z.object({ date: dateString, bagsDelta: z.number().min(-10000).max(10000).refine((n) => n !== 0), reason: optText }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      const rows = await db.insert(schema.adjustments).values({ date: args.date, bagsDelta: args.bagsDelta, reason: clean(args.reason) }).returning({ id: schema.adjustments.id });
+      const rows = await db.insert(schema.adjustments).values({ userId: user.id, date: args.date, bagsDelta: args.bagsDelta, reason: clean(args.reason) }).returning({ id: schema.adjustments.id });
       const row = rows[0];
       if (!row) throw new Error("addAdjustment: insert returned no rows");
       return { id: row.id };
@@ -379,14 +657,17 @@ export const Actions = {
     request: z.object({ date: dateString, countedBags: z.number().min(0).max(10000), reason: optText }),
     response: z.object({ ok: z.boolean(), delta: z.number() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
       const [purchases, burns, adjustments] = await Promise.all([
-        db.select().from(schema.purchases), db.select().from(schema.burnLogs), db.select().from(schema.adjustments),
+        db.select().from(schema.purchases).where(eq(schema.purchases.userId, user.id)),
+        db.select().from(schema.burnLogs).where(eq(schema.burnLogs.userId, user.id)),
+        db.select().from(schema.adjustments).where(eq(schema.adjustments.userId, user.id)),
       ]);
       const onHand = purchases.reduce((s, r) => s + r.bags, 0) - burns.reduce((s, r) => s + r.bags, 0) + adjustments.reduce((s, r) => s + r.bagsDelta, 0);
       const delta = round1(args.countedBags - onHand);
       if (delta !== 0) {
-        await db.insert(schema.adjustments).values({ date: args.date, bagsDelta: delta, reason: clean(args.reason) ?? "Physical count" });
+        await db.insert(schema.adjustments).values({ userId: user.id, date: args.date, bagsDelta: delta, reason: clean(args.reason) ?? "Physical count" });
       }
       return { ok: true, delta };
     },
@@ -397,8 +678,9 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      await db.delete(schema.adjustments).where(eq(schema.adjustments.id, args.id));
+      await db.delete(schema.adjustments).where(and(eq(schema.adjustments.id, args.id), eq(schema.adjustments.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -408,9 +690,13 @@ export const Actions = {
     request: z.object({ stoveId: z.number().int().positive(), title: z.string().trim().min(1).max(80), intervalDays: z.number().int().positive().max(3650).nullable().optional(), notes: optText }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
+      if (!(await ownStove(db, user.id, args.stoveId))) {
+        throw new Error("That stove isn't on your account, cool cat.");
+      }
       const rows = await db.insert(schema.maintenanceTasks).values({
-        stoveId: args.stoveId, title: args.title.trim(), intervalDays: args.intervalDays ?? null, notes: clean(args.notes),
+        userId: user.id, stoveId: args.stoveId, title: args.title.trim(), intervalDays: args.intervalDays ?? null, notes: clean(args.notes),
       }).returning({ id: schema.maintenanceTasks.id });
       const row = rows[0];
       if (!row) throw new Error("addMaintenanceTask: insert returned no rows");
@@ -423,8 +709,10 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive(), title: z.string().trim().min(1).max(80), intervalDays: z.number().int().positive().max(3650).nullable().optional(), notes: optText }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      await db.update(schema.maintenanceTasks).set({ title: args.title.trim(), intervalDays: args.intervalDays ?? null, notes: clean(args.notes) }).where(eq(schema.maintenanceTasks.id, args.id));
+      if (!(await ownTask(db, user.id, args.id))) return { ok: false };
+      await db.update(schema.maintenanceTasks).set({ title: args.title.trim(), intervalDays: args.intervalDays ?? null, notes: clean(args.notes) }).where(and(eq(schema.maintenanceTasks.id, args.id), eq(schema.maintenanceTasks.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -434,12 +722,14 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
+      if (!(await ownTask(db, user.id, args.id))) return { ok: false };
       // A transaction, not db.batch: the standalone BunSQLiteDatabase type
       // does not expose batch, and a transaction keeps the two deletes atomic.
       await db.transaction(async (tx) => {
-        await tx.delete(schema.maintenanceLogs).where(eq(schema.maintenanceLogs.taskId, args.id));
-        await tx.delete(schema.maintenanceTasks).where(eq(schema.maintenanceTasks.id, args.id));
+        await tx.delete(schema.maintenanceLogs).where(and(eq(schema.maintenanceLogs.taskId, args.id), eq(schema.maintenanceLogs.userId, user.id)));
+        await tx.delete(schema.maintenanceTasks).where(and(eq(schema.maintenanceTasks.id, args.id), eq(schema.maintenanceTasks.userId, user.id)));
       });
       return { ok: true };
     },
@@ -450,8 +740,12 @@ export const Actions = {
     request: z.object({ taskId: z.number().int().positive(), date: dateString, note: optText }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      const rows = await db.insert(schema.maintenanceLogs).values({ taskId: args.taskId, date: args.date, note: clean(args.note) }).returning({ id: schema.maintenanceLogs.id });
+      if (!(await ownTask(db, user.id, args.taskId))) {
+        throw new Error("That task isn't on your account, cool cat.");
+      }
+      const rows = await db.insert(schema.maintenanceLogs).values({ userId: user.id, taskId: args.taskId, date: args.date, note: clean(args.note) }).returning({ id: schema.maintenanceLogs.id });
       const row = rows[0];
       if (!row) throw new Error("addMaintenanceLog: insert returned no rows");
       return { id: row.id };
@@ -463,8 +757,11 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive(), date: dateString, note: optText }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      await db.update(schema.maintenanceLogs).set({ date: args.date, note: clean(args.note) }).where(eq(schema.maintenanceLogs.id, args.id));
+      const found = await db.select({ id: schema.maintenanceLogs.id }).from(schema.maintenanceLogs).where(and(eq(schema.maintenanceLogs.id, args.id), eq(schema.maintenanceLogs.userId, user.id))).limit(1);
+      if (found.length === 0) return { ok: false };
+      await db.update(schema.maintenanceLogs).set({ date: args.date, note: clean(args.note) }).where(and(eq(schema.maintenanceLogs.id, args.id), eq(schema.maintenanceLogs.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -474,8 +771,9 @@ export const Actions = {
     request: z.object({ id: z.number().int().positive() }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      await db.delete(schema.maintenanceLogs).where(eq(schema.maintenanceLogs.id, args.id));
+      await db.delete(schema.maintenanceLogs).where(and(eq(schema.maintenanceLogs.id, args.id), eq(schema.maintenanceLogs.userId, user.id)));
       return { ok: true };
     },
   }),
@@ -491,14 +789,21 @@ export const Actions = {
     }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
+      const user = requireUser(ctx);
       const db = ctx.db;
-      await db.update(schema.settings).set({
+      const values = {
         manualBurnRate: args.manualBurnRate ?? null,
         burnWindowDays: args.burnWindowDays,
         lowStockDays: args.lowStockDays,
         targetDate: args.targetDate ?? null,
         safetyBags: args.safetyBags,
-      }).where(eq(schema.settings.id, 1));
+      };
+      const existing = await db.select({ id: schema.settings.id }).from(schema.settings).where(eq(schema.settings.userId, user.id)).limit(1);
+      if (existing.length === 0) {
+        await db.insert(schema.settings).values({ userId: user.id, ...values });
+      } else {
+        await db.update(schema.settings).set(values).where(eq(schema.settings.userId, user.id));
+      }
       return { ok: true };
     },
   }),
