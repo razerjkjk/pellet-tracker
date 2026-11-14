@@ -1,0 +1,62 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1793841059105,
+      "tag": "0001_initial",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793841059105,
+      "tag": "0002_pellet_tracker_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793841059105,
+      "tag": "0003_maintenance_tasks_and_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793841059105,
+      "tag": "0004_stove_manuals_and_seeded_stoves",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1793841274005,
+      "tag": "0005_pellet_pro_tsc90_correction",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794175130022,
+      "tag": "0006_master_force_stove_correction",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794175225538,
+      "tag": "0007_master_force_h140xl_details_and_manual_schedule",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1794181319682,
+      "tag": "0008_factory_troubleshooting_guides",
+      "breakpoints": true
+    }
+  ]
+}

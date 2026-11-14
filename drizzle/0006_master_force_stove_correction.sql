@@ -1,0 +1,1 @@
+UPDATE stoves SET name = 'Master Force', manual_url = NULL, details = 'Master Force pellet stove — model not confirmed yet' WHERE name = 'Pellet King (King)' OR manual_url = 'https://manuals.stove-parts-unlimited.com/pellet/king/king-kp60-owners-manual-owners-manual.pdf';
