@@ -119,6 +119,11 @@ select option {
   50% { transform: scaleY(1); }
 }
 
+@keyframes disco-ball-light-sweep {
+  from { transform: translateX(-30%); opacity: 0.45; }
+  to { transform: translateX(160%); opacity: 0.9; }
+}
+
 @keyframes disco-ball-sway {
   0%, 100% { transform: rotate(-4deg); }
   50% { transform: rotate(4deg); }
@@ -167,6 +172,14 @@ select option {
   box-shadow: 0 0 34px rgba(255, 210, 63, 0.55), 0 0 70px rgba(255, 46, 136, 0.35);
 }
 
+.disco-ball-sweep {
+  animation: disco-ball-light-sweep 7s ease-in-out infinite alternate;
+}
+
+.disco-boogie .disco-ball-sweep {
+  animation-duration: 2.6s;
+}
+
 .disco-ball-sway {
   animation: disco-ball-sway 6s ease-in-out infinite;
   transform-origin: top center;
@@ -207,6 +220,7 @@ select option {
   .disco-beam,
   .disco-floor-tile,
   .disco-ball,
+  .disco-ball-sweep,
   .disco-ball-sway,
   .disco-sparkle,
   .disco-marquee-track,

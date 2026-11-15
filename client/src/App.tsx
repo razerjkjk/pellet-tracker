@@ -2,6 +2,12 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, type ApiRequest, type ApiResponse } from "./api";
+// Real disco photographs, baked in as local files. The drawn CSS ball,
+// beams, and floor tiles stay in place underneath as the fallback if a
+// photo ever fails to load.
+import discoBallPhoto from "./assets/disco-ball.jpg";
+import discoLightsPhoto from "./assets/disco-lights.jpg";
+import discoBeamsPhoto from "./assets/disco-beams.jpg";
 
 type Data = ApiResponse<typeof api, "getData">;
 type Stove = Data["stoves"][number];
@@ -103,32 +109,67 @@ const SPARKLES = [
   { left: "62%", top: "68%", delay: "1.5s" },
 ];
 
+// The four sweeping beams: rgb triplet plus peak alpha over the photo
+// (subtle, photo shows through) and at full strength when the club photo
+// failed to load and the drawn beams carry the look alone.
+const DISCO_BEAMS = [
+  { left: "left-[4%]", rgb: "255,46,136", over: 0.42, full: 0.65, rev: false, delay: undefined as string | undefined },
+  { left: "left-[32%]", rgb: "0,229,192", over: 0.38, full: 0.55, rev: true, delay: undefined as string | undefined },
+  { left: "left-[60%]", rgb: "255,210,63", over: 0.4, full: 0.6, rev: false, delay: "1.2s" },
+  { left: "left-[82%]", rgb: "123,79,214", over: 0.4, full: 0.6, rev: true, delay: "0.6s" },
+];
+
 function DiscoBackdrop({ lightsOn }: { lightsOn: boolean }) {
-  if (!lightsOn) {
-    return (
-      <div className="pointer-events-none fixed inset-0 z-0" aria-hidden="true"
-        style={{ background: "radial-gradient(120% 90% at 50% 0%, #2a0f4d 0%, #12041f 55%, #08020f 100%)" }} />
-    );
-  }
+  // The real photos stay, and the animated CSS lights play on top of them:
+  // beams sweep across the club photo and floor tiles flash over the laser
+  // photo. If a photo fails to load, its drawn lights render at full
+  // strength as the fallback, exactly as before. Lights off: photo only.
+  const [lightsPhotoOk, setLightsPhotoOk] = useState(true);
+  const [floorPhotoOk, setFloorPhotoOk] = useState(true);
   return (
     <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden" aria-hidden="true"
       style={{ background: "radial-gradient(120% 90% at 50% 0%, #3a1160 0%, #1a0633 48%, #0a0216 100%)" }}>
-      <div className="disco-beam left-[4%] top-0" style={{ background: "linear-gradient(180deg, rgba(255,46,136,0.65), rgba(255,46,136,0))", clipPath: "polygon(42% 0, 58% 0, 100% 100%, 0 100%)" }} />
-      <div className="disco-beam disco-beam-rev left-[32%]" style={{ background: "linear-gradient(180deg, rgba(0,229,192,0.55), rgba(0,229,192,0))", clipPath: "polygon(42% 0, 58% 0, 100% 100%, 0 100%)" }} />
-      <div className="disco-beam left-[60%]" style={{ background: "linear-gradient(180deg, rgba(255,210,63,0.6), rgba(255,210,63,0))", clipPath: "polygon(42% 0, 58% 0, 100% 100%, 0 100%)", animationDelay: "1.2s" }} />
-      <div className="disco-beam disco-beam-rev left-[82%]" style={{ background: "linear-gradient(180deg, rgba(123,79,214,0.6), rgba(123,79,214,0))", clipPath: "polygon(42% 0, 58% 0, 100% 100%, 0 100%)", animationDelay: "0.6s" }} />
-      {SPARKLES.map((s, i) => (
-        <span key={i} className="disco-sparkle absolute text-lg text-[#ffe9a8]" style={{ left: s.left, top: s.top, animationDelay: s.delay }}>✦</span>
-      ))}
-      <div className="absolute inset-x-0 bottom-0 h-[168px] sm:h-[190px]" style={{ transform: "perspective(420px) rotateX(52deg) scale(1.25)", transformOrigin: "bottom" }}>
-        <div className="grid h-full grid-cols-8 grid-rows-3 gap-[3px] bg-black/40 p-[3px]">
-          {Array.from({ length: 24 }, (_, i) => (
-            <span key={i} className="disco-floor-tile block rounded-[3px]"
-              style={{ background: FLOOR_COLORS[i % FLOOR_COLORS.length], animationDelay: `${(i % 8) * 0.28 + Math.floor(i / 8) * 0.5}s` }} />
+      {lightsPhotoOk && (
+        <img src={discoLightsPhoto} alt="" aria-hidden="true" draggable={false}
+          className="absolute inset-0 h-full w-full object-cover opacity-45"
+          onError={() => setLightsPhotoOk(false)} />
+      )}
+      {/* Heavy dark overlay over the club photo, so every total, form, and
+          button above it stays fully readable. */}
+      <div className="absolute inset-0" style={{ background: "linear-gradient(180deg, rgba(10,2,22,0.68) 0%, rgba(10,2,22,0.8) 45%, rgba(10,2,22,0.92) 100%)" }} />
+      {lightsOn && (
+        <>
+          {/* Animated beams sweeping over the photo, screen-blended. Full
+              strength only when the photo failed and they are the fallback. */}
+          {DISCO_BEAMS.map((b, i) => {
+            const a = lightsPhotoOk ? b.over : b.full;
+            return (
+              <div key={i} className={`disco-beam ${b.rev ? "disco-beam-rev" : ""} ${b.left}`}
+                style={{ background: `linear-gradient(180deg, rgba(${b.rgb},${a}), rgba(${b.rgb},0))`, clipPath: "polygon(42% 0, 58% 0, 100% 100%, 0 100%)", animationDelay: b.delay }} />
+            );
+          })}
+          {SPARKLES.map((s, i) => (
+            <span key={i} className="disco-sparkle absolute text-lg text-[#ffe9a8]" style={{ left: s.left, top: s.top, animationDelay: s.delay }}>✦</span>
           ))}
-        </div>
-      </div>
-      <div className="absolute inset-0" style={{ background: "linear-gradient(180deg, rgba(10,2,22,0.25) 0%, rgba(10,2,22,0.15) 55%, rgba(10,2,22,0.55) 100%)" }} />
+          <div className="absolute inset-x-0 bottom-0 h-[168px] sm:h-[190px]" style={{ transform: "perspective(420px) rotateX(52deg) scale(1.25)", transformOrigin: "bottom" }}>
+            {floorPhotoOk && (
+              <img src={discoBeamsPhoto} alt="" aria-hidden="true" draggable={false}
+                className="absolute inset-0 h-full w-full object-cover opacity-75"
+                onError={() => setFloorPhotoOk(false)} />
+            )}
+            {/* Flashing floor tiles over the laser photo, dimmed so the photo
+                shows through; full strength when the photo failed. */}
+            <div className="absolute inset-0 grid grid-cols-8 grid-rows-3 gap-[3px] bg-black/40 p-[3px]"
+              style={{ opacity: floorPhotoOk ? 0.5 : 1 }}>
+              {Array.from({ length: 24 }, (_, i) => (
+                <span key={i} className="disco-floor-tile block rounded-[3px]"
+                  style={{ background: FLOOR_COLORS[i % FLOOR_COLORS.length], animationDelay: `${(i % 8) * 0.28 + Math.floor(i / 8) * 0.5}s` }} />
+              ))}
+            </div>
+          </div>
+          <div className="absolute inset-0" style={{ background: "linear-gradient(180deg, rgba(10,2,22,0.25) 0%, rgba(10,2,22,0.15) 55%, rgba(10,2,22,0.55) 100%)" }} />
+        </>
+      )}
     </div>
   );
 }
@@ -395,6 +436,7 @@ export function App() {
   const [confirmDeleteStove, setConfirmDeleteStove] = useState<number | null>(null);
   const [stoveMsg, setStoveMsg] = useState("");
   const [lightsOn, setLightsOn] = useState(true);
+  const [ballPhotoOk, setBallPhotoOk] = useState(true);
   const [boogie, setBoogie] = useState(false);
   const [showThemeSong, setShowThemeSong] = useState(false);
   const { playing, grooveMsg, toggleGroove } = useDiscoGroove();
@@ -428,7 +470,29 @@ export function App() {
         {/* Disco header: mirror ball, marquee, lights + groove controls */}
         <div className="disco-ball-sway mx-auto w-fit" aria-hidden="true">
           <div className="mx-auto h-8 w-px bg-[#ffd23f]/80" />
-          <div className="disco-ball h-[84px] w-[84px] rounded-full sm:h-[96px] sm:w-[96px]" />
+          <div className="relative h-[84px] w-[84px] sm:h-[96px] sm:w-[96px]">
+            {/* Drawn CSS ball stays underneath as the fallback. */}
+            <div className="disco-ball absolute inset-0 rounded-full" />
+            {ballPhotoOk && (
+              <img src={discoBallPhoto} alt="" aria-hidden="true" draggable={false}
+                className="absolute inset-0 h-full w-full scale-[1.04] rounded-full object-cover shadow-[0_0_34px_rgba(255,210,63,0.45),0_0_70px_rgba(255,46,136,0.3)]"
+                onError={() => setBallPhotoOk(false)} />
+            )}
+            {/* Club lights hitting the ball: colored reflections plus a slow
+                beam sweep, clipped to the round frame, above photo and fallback. */}
+            {lightsOn && (
+              <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-full" aria-hidden="true">
+                <div className="absolute inset-0 mix-blend-screen"
+                  style={{ background: "radial-gradient(circle at 22% 18%, rgba(255,46,136,0.55) 0%, rgba(255,46,136,0) 55%)" }} />
+                <div className="absolute inset-0 mix-blend-screen"
+                  style={{ background: "radial-gradient(circle at 82% 84%, rgba(0,229,255,0.5) 0%, rgba(0,229,255,0) 55%)" }} />
+                <div className="absolute inset-0 mix-blend-screen"
+                  style={{ background: "radial-gradient(circle at 58% 6%, rgba(255,210,63,0.5) 0%, rgba(255,210,63,0) 48%)" }} />
+                <div className="disco-ball-sweep absolute inset-y-0 -left-1/2 w-3/5 mix-blend-screen"
+                  style={{ background: "linear-gradient(100deg, rgba(255,244,200,0) 0%, rgba(255,244,200,0.55) 50%, rgba(255,244,200,0) 100%)", filter: "blur(6px)" }} />
+              </div>
+            )}
+          </div>
         </div>
         <p className="disco-font mt-3 text-center text-[26px] leading-tight text-[#ffd23f] [text-shadow:0_0_18px_rgba(255,46,136,0.75)] sm:text-4xl">Stayin&rsquo; Warm</p>
         <p className="display mt-1 text-center text-sm font-semibold uppercase tracking-[0.28em] text-[#ff9ec6]">Pellet Tracker &bull; Boogie Nights Edition</p>
