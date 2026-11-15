@@ -12,6 +12,9 @@ export const users = sqliteTable(
     email: text("email").notNull(),
     /** First name, shown in the header once signed in. */
     name: text("name").notNull(),
+    /** Dance-off board opt-in. Off by default; nothing about the account
+     *  shows on the board until the user turns it on themselves. */
+    danceOffOptIn: integer("dance_off_opt_in", { mode: "boolean" }).notNull().default(false),
     passwordHash: text("password_hash").notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   },
@@ -104,6 +107,8 @@ export const settings = sqliteTable("settings", {
   lowStockDays: integer("low_stock_days").notNull().default(7),
   targetDate: text("target_date"),
   safetyBags: real("safety_bags").notNull().default(0),
+  /** Heating season end, month-day ("04-15"). Drives the race to spring. */
+  seasonEnd: text("season_end").notNull().default("04-15"),
 });
 
 export const maintenanceTasks = sqliteTable("maintenance_tasks", {

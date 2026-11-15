@@ -14,6 +14,7 @@ import {
   type SessionUser,
 } from "./auth";
 import { allow, reset as resetLimit } from "./ratelimit";
+import { streakStats } from "./boogie";
 
 /** Everything an action handler needs. Provided by server.ts per request. */
 export interface ActionContext {
@@ -194,7 +195,28 @@ const burnOut = z.object({ id: z.number(), stoveId: z.number().nullable(), date:
 const adjustmentOut = z.object({ id: z.number(), date: z.string(), bagsDelta: z.number(), reason: z.string().nullable() });
 const settingsOut = z.object({
   manualBurnRate: z.number().nullable(), burnWindowDays: z.number(), lowStockDays: z.number(),
-  targetDate: z.string().nullable(), safetyBags: z.number(),
+  targetDate: z.string().nullable(), safetyBags: z.number(), seasonEnd: z.string(),
+});
+const boogieOut = z.object({
+  currentStreak: z.number(), longestStreak: z.number(),
+  totalBurned: z.number(), title: z.string(),
+  badges: z.array(z.object({
+    key: z.enum(["first_burn", "bags_100", "deep_clean", "week_streak", "inferno"]),
+    earnedDate: z.string().nullable(),
+  })),
+  stoveVs: z.array(z.object({
+    stoveId: z.number(), name: z.string(), hasBurns: z.boolean(),
+    totalBags: z.number(), bagsPerDay: z.number().nullable(),
+    thisWeekBags: z.number(), wins: z.number(), losses: z.number(),
+  })),
+  thisWeek: z.object({ kind: z.enum(["winner", "only_one", "tie", "none"]), stoveId: z.number().nullable() }),
+  race: z.object({
+    seasonEnd: z.string(), seasonEndDate: z.string(), daysLeft: z.number(),
+    affordableRate: z.number().nullable(), neededBags: z.number().nullable(),
+    status: z.enum(["ahead", "behind", "no_rate"]),
+    spareBags: z.number().nullable(), cushionDays: z.number().nullable(),
+    shortBags: z.number().nullable(), runOutDate: z.string().nullable(),
+  }),
 });
 const maintenanceTaskOut = z.object({
   id: z.number(), stoveId: z.number(), title: z.string(), intervalDays: z.number().nullable(),
@@ -219,7 +241,7 @@ const dataResponse = z.object({
   adjustments: z.array(adjustmentOut), settings: settingsOut,
   maintenanceTasks: z.array(maintenanceTaskOut), maintenanceLogs: z.array(maintenanceLogOut),
   troubleshootingItems: z.array(troubleshootingOut),
-  summary: summaryOut,
+  summary: summaryOut, boogie: boogieOut,
 });
 
 export const Actions = {
@@ -230,14 +252,23 @@ export const Actions = {
     request: z.object({}),
     response: z.object({
       user: z
-        .object({ id: z.number(), email: z.string(), name: z.string() })
+        .object({ id: z.number(), email: z.string(), name: z.string(), danceOffOptIn: z.boolean() })
         .nullable(),
     }),
     async handler(ctx) {
+      if (!ctx.user) return { user: null };
+      const rows = await ctx.db
+        .select({ danceOffOptIn: schema.users.danceOffOptIn })
+        .from(schema.users)
+        .where(eq(schema.users.id, ctx.user.id))
+        .limit(1);
       return {
-        user: ctx.user
-          ? { id: ctx.user.id, email: ctx.user.email, name: ctx.user.name }
-          : null,
+        user: {
+          id: ctx.user.id,
+          email: ctx.user.email,
+          name: ctx.user.name,
+          danceOffOptIn: rows[0]?.danceOffOptIn ?? false,
+        },
       };
     },
   }),
@@ -338,6 +369,70 @@ export const Actions = {
     },
   }),
 
+  // ---- Dance-off board --------------------------------------------------
+  // Opt-in leaderboard: only a display name, the current boogie streak,
+  // and bags burned per day ever leave an account — and only when that
+  // account turned the toggle on itself.
+
+  setDanceOffOptIn: defineAction({
+    description: "Turns the caller's dance-off board listing on or off. Off by default; turning it off removes the account from the board right away.",
+    request: z.object({ optIn: z.boolean() }),
+    response: z.object({ ok: z.boolean(), optIn: z.boolean() }),
+    async handler(ctx, args) {
+      const user = requireUser(ctx);
+      if (!allow(`danceoff:ip:${ctx.ip}`, 30, 15 * MINUTE)) {
+        throw new Error("Too many toggles from here. Try again in a little while.");
+      }
+      await ctx.db.update(schema.users).set({ danceOffOptIn: args.optIn }).where(eq(schema.users.id, user.id));
+      return { ok: true, optIn: args.optIn };
+    },
+  }),
+
+  getDanceOffBoard: defineAction({
+    description: "Returns the dance-off board: every opted-in account's display name, current boogie streak, and bags burned per day, ranked by lowest bags a day. No emails, purchases, stove names, or burn detail.",
+    request: z.object({}),
+    response: z.object({
+      ok: z.boolean(),
+      entries: z.array(z.object({ name: z.string(), streakDays: z.number().int(), bagsPerDay: z.number().nullable() })),
+      myName: z.string().nullable(),
+    }),
+    async handler(ctx) {
+      const user = requireUser(ctx);
+      const db = ctx.db;
+      // The board ranks by the server's calendar day, so every dancer is
+      // measured on the same clock.
+      const today = new Date().toISOString().slice(0, 10);
+      const optedIn = await db
+        .select({ id: schema.users.id, name: schema.users.name })
+        .from(schema.users)
+        .where(eq(schema.users.danceOffOptIn, true));
+      const entries: { name: string; streakDays: number; bagsPerDay: number | null }[] = [];
+      for (const u of optedIn) {
+        const burns = await db
+          .select({ date: schema.burnLogs.date, bags: schema.burnLogs.bags })
+          .from(schema.burnLogs)
+          .where(eq(schema.burnLogs.userId, u.id))
+          .orderBy(asc(schema.burnLogs.date));
+        const dates = [...new Set(burns.map((b) => b.date))].sort();
+        const { currentStreak } = streakStats(dates, today);
+        const total = burns.reduce((s, b) => s + b.bags, 0);
+        const first = dates[0] ?? null;
+        const bagsPerDay = first != null
+          ? Math.round((total / Math.max(1, diffDays(first, today))) * 100) / 100
+          : null;
+        entries.push({ name: u.name, streakDays: currentStreak, bagsPerDay });
+      }
+      entries.sort((a, b) => {
+        if (a.bagsPerDay == null && b.bagsPerDay == null) return b.streakDays - a.streakDays;
+        if (a.bagsPerDay == null) return 1;
+        if (b.bagsPerDay == null) return -1;
+        if (a.bagsPerDay !== b.bagsPerDay) return a.bagsPerDay - b.bagsPerDay;
+        return b.streakDays - a.streakDays;
+      });
+      return { ok: true, entries, myName: user.name };
+    },
+  }),
+
   getData: defineAction({
     description: "Loads the signed-in account's stoves, purchases, burn logs, adjustments, maintenance, settings, and the computed supply forecast.",
     request: z.object({ today: dateString }),
@@ -364,6 +459,7 @@ export const Actions = {
         lowStockDays: settingsRow?.lowStockDays ?? 7,
         targetDate: settingsRow?.targetDate ?? null,
         safetyBags: settingsRow?.safetyBags ?? 0,
+        seasonEnd: settingsRow?.seasonEnd ?? "04-15",
       };
       const stoveById = new Map(stoveRows.map((s) => [s.id, s]));
 
@@ -454,6 +550,116 @@ export const Actions = {
         };
       });
 
+      // --- Boogie Board: streaks, badges, stove vs stove, race to spring ---
+      // Everything below is computed only from real logged rows, scoped to
+      // this account (burnRows, taskRows, and logRows are already filtered
+      // by userId above).
+
+      // Streaks: consecutive calendar days with at least one burn logged.
+      const burnDates = [...new Set(burnRows.map((r) => r.date))].sort();
+      const { currentStreak, longestStreak, streakReachedOn } = streakStats(burnDates, today);
+
+      // Title by cumulative bags burned.
+      const title = totalBurned >= 250 ? "Disco King" : totalBurned >= 100 ? "Boogie Pro" : totalBurned >= 25 ? "Groovy Regular" : "Funky Freshman";
+
+      // Badges.
+      const firstBurnDate = burnDates[0] ?? null;
+      let bags100Date: string | null = null;
+      {
+        let running = 0;
+        const chronological = [...burnRows].sort((a, b) => (a.date === b.date ? a.id - b.id : a.date < b.date ? -1 : 1));
+        for (const r of chronological) {
+          running += r.bags;
+          if (running >= 100) { bags100Date = r.date; break; }
+        }
+      }
+      const deepCleanTaskIds = new Set(taskRows.filter((t) => t.title.toLowerCase().includes("deep clean")).map((t) => t.id));
+      const deepCleanDates = logRows.filter((l) => deepCleanTaskIds.has(l.taskId)).map((l) => l.date).sort();
+      const badges = [
+        { key: "first_burn" as const, earnedDate: firstBurnDate },
+        { key: "bags_100" as const, earnedDate: bags100Date },
+        { key: "deep_clean" as const, earnedDate: deepCleanDates[0] ?? null },
+        { key: "week_streak" as const, earnedDate: streakReachedOn.get(7) ?? null },
+        { key: "inferno" as const, earnedDate: streakReachedOn.get(30) ?? null },
+      ];
+
+      // Stove vs stove. Weeks run Monday to Sunday.
+      const mondayOf = (date: string): string => {
+        const dow = new Date(dayMs(date)).getUTCDay(); // 0 = Sunday
+        return addDays(date, -((dow + 6) % 7));
+      };
+      const currentMonday = mondayOf(today);
+      const weekBags = (stoveId: number, monday: string): number =>
+        round1(burnRows.filter((r) => r.stoveId === stoveId && mondayOf(r.date) === monday).reduce((s, r) => s + r.bags, 0));
+      const allMondays = [...new Set(burnRows.map((r) => mondayOf(r.date)))].sort();
+      const stoveVs = stoveRows.map((st) => {
+        const rows = burnRows.filter((r) => r.stoveId === st.id);
+        const total = round1(rows.reduce((s, r) => s + r.bags, 0));
+        const firstBurn = rows.map((r) => r.date).sort()[0] ?? null;
+        const bagsPerDay = firstBurn != null ? round1(total / Math.max(1, diffDays(firstBurn, today))) : null;
+        return {
+          stoveId: st.id, name: st.name, hasBurns: rows.length > 0,
+          totalBags: total, bagsPerDay, thisWeekBags: weekBags(st.id, currentMonday), wins: 0, losses: 0,
+        };
+      });
+      // Running W–L: each Monday-to-Sunday week where both stoves burned at
+      // least once — including this week so far — the stove with fewer bags
+      // that week takes the win. A tie: no win.
+      for (const monday of allMondays) {
+        const burned = stoveVs.filter((v) => weekBags(v.stoveId, monday) > 0);
+        if (burned.length < 2) continue;
+        const min = Math.min(...burned.map((v) => weekBags(v.stoveId, monday)));
+        const winners = burned.filter((v) => weekBags(v.stoveId, monday) === min);
+        if (winners.length !== 1) continue;
+        const winner = winners[0];
+        if (!winner) continue;
+        for (const v of stoveVs) {
+          if (v.stoveId === winner.stoveId) v.wins += 1;
+          else if (weekBags(v.stoveId, monday) > 0) v.losses += 1;
+        }
+      }
+      const thisWeekBurned = stoveVs.filter((v) => v.thisWeekBags > 0);
+      let thisWeek: z.infer<typeof boogieOut>["thisWeek"] = { kind: "none", stoveId: null };
+      if (thisWeekBurned.length === 1) {
+        const only = thisWeekBurned[0];
+        if (only) thisWeek = { kind: "only_one", stoveId: only.stoveId };
+      } else if (thisWeekBurned.length >= 2) {
+        const min = Math.min(...thisWeekBurned.map((v) => v.thisWeekBags));
+        const winners = thisWeekBurned.filter((v) => v.thisWeekBags === min);
+        const w = winners[0];
+        thisWeek = winners.length === 1 && w ? { kind: "winner", stoveId: w.stoveId } : { kind: "tie", stoveId: null };
+      }
+
+      // Race to spring: bags on hand vs days left in the heating season.
+      const seasonEnd = /^\d{2}-\d{2}$/.test(settings.seasonEnd) ? settings.seasonEnd : "04-15";
+      const thisYearEnd = `${today.slice(0, 4)}-${seasonEnd}`;
+      const seasonEndDate = dayMs(thisYearEnd) < dayMs(today) ? `${Number(today.slice(0, 4)) + 1}-${seasonEnd}` : thisYearEnd;
+      const raceDaysLeft = diffDays(today, seasonEndDate);
+      const affordableRate = raceDaysLeft > 0 ? Math.round((onHand / raceDaysLeft) * 100) / 100 : null;
+      const raceNeeded = burnRate != null && burnRate > 0 ? round1(burnRate * raceDaysLeft) : null;
+      let raceStatus: "ahead" | "behind" | "no_rate" = "no_rate";
+      let spareBags: number | null = null;
+      let cushionDays: number | null = null;
+      let shortBags: number | null = null;
+      if (raceNeeded != null && burnRate != null) {
+        if (onHand >= raceNeeded) {
+          raceStatus = "ahead";
+          spareBags = round1(onHand - raceNeeded);
+          cushionDays = round1(spareBags / burnRate);
+        } else {
+          raceStatus = "behind";
+          shortBags = round1(raceNeeded - onHand);
+        }
+      }
+      const boogie = {
+        currentStreak, longestStreak, totalBurned: round1(totalBurned), title, badges, stoveVs, thisWeek,
+        race: {
+          seasonEnd, seasonEndDate, daysLeft: raceDaysLeft, affordableRate, neededBags: raceNeeded,
+          status: raceStatus, spareBags, cushionDays, shortBags,
+          runOutDate: raceStatus === "behind" ? runOutDate : null,
+        },
+      };
+
       return {
         stoves: stoveRows.map((s) => ({ id: s.id, name: s.name, location: s.location, manualUrl: s.manualUrl, details: s.details, factoryName: s.factoryName ?? null, factoryPhone: s.factoryPhone ?? null, factoryEmail: s.factoryEmail ?? null, troubleshootingUrl: s.troubleshootingUrl ?? null })),
         troubleshootingItems: troubleRows.map((r) => ({
@@ -481,6 +687,7 @@ export const Actions = {
           totalAdjustments: round1(totalAdjustments), burnRate, burnRateSource, daysLeft, runOutDate,
           costPerBagCents, lastCostPerBagCents, neededBags, neededCostCents, daily, perStove,
         },
+        boogie,
       };
     },
   }),
@@ -786,6 +993,10 @@ export const Actions = {
       lowStockDays: z.number().int().min(0).max(60),
       targetDate: dateString.nullable().optional(),
       safetyBags: z.number().min(0).max(1000),
+      seasonEnd: z.string().regex(/^\d{2}-\d{2}$/).refine((v) => {
+        const [m = 0, d = 0] = v.split("-").map(Number);
+        return m >= 1 && m <= 12 && d >= 1 && d <= 31;
+      }).optional(),
     }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
@@ -797,6 +1008,7 @@ export const Actions = {
         lowStockDays: args.lowStockDays,
         targetDate: args.targetDate ?? null,
         safetyBags: args.safetyBags,
+        seasonEnd: args.seasonEnd ?? "04-15",
       };
       const existing = await db.select({ id: schema.settings.id }).from(schema.settings).where(eq(schema.settings.userId, user.id)).limit(1);
       if (existing.length === 0) {

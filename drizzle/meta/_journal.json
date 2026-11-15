@@ -64,6 +64,20 @@
       "when": 1794600000000,
       "tag": "0009_accounts_and_per_user_data",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794752941022,
+      "tag": "0010_dance_off_opt_in",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794752941022,
+      "tag": "0011_season_end_setting",
+      "breakpoints": true
     }
   ]
 }

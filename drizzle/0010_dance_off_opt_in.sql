@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN dance_off_opt_in INTEGER NOT NULL DEFAULT 0;

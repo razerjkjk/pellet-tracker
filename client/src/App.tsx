@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, type ApiRequest, type ApiResponse } from "./api";
@@ -100,6 +100,13 @@ const THEME_SONG_YOUTUBE = "https://www.youtube.com/watch?v=fNFzfwLM72c&list=PLO
 const THEME_SONG_YOUTUBE_EMBED = "https://www.youtube.com/embed/fNFzfwLM72c";
 const THEME_SONG_SPOTIFY = "https://open.spotify.com/track/4ol89GA3D3AQOX3mhWJqlt";
 const THEME_SONG_APPLE = "https://music.apple.com/us/song/stayin-alive/1440900114";
+// Groove song: the real Bee Gees recording of "You Should Be Dancing",
+// streamed from licensed services the same way as the theme song — never
+// bundled as an audio file. This is the groove track now.
+const GROOVE_SONG_YOUTUBE = "https://www.youtube.com/watch?v=V0r0jQYE0yE";
+const GROOVE_SONG_YOUTUBE_EMBED = "https://www.youtube.com/embed/V0r0jQYE0yE";
+const GROOVE_SONG_SPOTIFY = "https://open.spotify.com/track/2xiOdusRnZezQok1RgLNeS";
+const GROOVE_SONG_APPLE = "https://music.apple.com/us/song/you-should-be-dancing/1445668687";
 const SPARKLES = [
   { left: "8%", top: "18%", delay: "0s" },
   { left: "18%", top: "52%", delay: "0.6s" },
@@ -184,136 +191,6 @@ function Equalizer({ playing }: { playing: boolean }) {
       ))}
     </span>
   );
-}
-
-/** Opt-in synthesized disco groove: four-on-the-floor kick, off-beat hats, funk bass. No audio plays until the user taps play. */
-function useDiscoGroove() {
-  const [playing, setPlaying] = useState(false);
-  const [grooveMsg, setGrooveMsg] = useState("");
-  const ctxRef = useRef<AudioContext | null>(null);
-  const timerRef = useRef<number | null>(null);
-  const stepRef = useRef(0);
-  const nextTimeRef = useRef(0);
-
-  const stopGroove = () => {
-    if (timerRef.current != null) window.clearInterval(timerRef.current);
-    timerRef.current = null;
-    if (ctxRef.current) {
-      void ctxRef.current.close().catch(() => undefined);
-      ctxRef.current = null;
-    }
-    setPlaying(false);
-  };
-
-  useEffect(() => () => {
-    if (timerRef.current != null) window.clearInterval(timerRef.current);
-    if (ctxRef.current) void ctxRef.current.close().catch(() => undefined);
-  }, []);
-
-  function scheduleStep(ctx: AudioContext, out: GainNode, step: number, when: number) {
-    const bpm = 116;
-    const sixteenth = 60 / bpm / 4;
-    void sixteenth;
-    // Kick on every beat.
-    if (step % 4 === 0) {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.frequency.setValueAtTime(150, when);
-      osc.frequency.exponentialRampToValueAtTime(42, when + 0.12);
-      gain.gain.setValueAtTime(0.9, when);
-      gain.gain.exponentialRampToValueAtTime(0.001, when + 0.18);
-      osc.connect(gain).connect(out);
-      osc.start(when);
-      osc.stop(when + 0.2);
-    }
-    // Open hat on the off-beats, closed hat ticking through.
-    if (step % 4 === 2 || step % 2 === 1) {
-      const len = step % 4 === 2 ? 0.16 : 0.05;
-      const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * len), ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
-      const src = ctx.createBufferSource();
-      src.buffer = buffer;
-      const filter = ctx.createBiquadFilter();
-      filter.type = "highpass";
-      filter.frequency.value = 7000;
-      const gain = ctx.createGain();
-      gain.gain.value = step % 4 === 2 ? 0.32 : 0.16;
-      src.connect(filter).connect(gain).connect(out);
-      src.start(when);
-    }
-    // Clap on beats 2 and 4.
-    if (step === 4 || step === 12) {
-      const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.14), ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
-      const src = ctx.createBufferSource();
-      src.buffer = buffer;
-      const filter = ctx.createBiquadFilter();
-      filter.type = "bandpass";
-      filter.frequency.value = 1800;
-      const gain = ctx.createGain();
-      gain.gain.value = 0.4;
-      src.connect(filter).connect(gain).connect(out);
-      src.start(when);
-    }
-    // Funky octave bassline.
-    const bassNotes: (number | null)[] = [55, null, 55, 65.41, 55, null, 82.41, 55, 55, null, 55, 65.41, 98, 82.41, 73.42, 65.41];
-    const freq = bassNotes[step];
-    if (freq != null) {
-      const osc = ctx.createOscillator();
-      osc.type = "sawtooth";
-      osc.frequency.value = freq;
-      const filter = ctx.createBiquadFilter();
-      filter.type = "lowpass";
-      filter.frequency.setValueAtTime(900, when);
-      filter.frequency.exponentialRampToValueAtTime(220, when + 0.16);
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.34, when);
-      gain.gain.exponentialRampToValueAtTime(0.001, when + 0.2);
-      osc.connect(filter).connect(gain).connect(out);
-      osc.start(when);
-      osc.stop(when + 0.22);
-    }
-  }
-
-  function toggleGroove() {
-    if (playing) {
-      stopGroove();
-      setGrooveMsg("Groove stopped — the lights keep on dancin'.");
-      return;
-    }
-    try {
-      const AudioCtx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) {
-        setGrooveMsg("Bummer — this device won't start the groove. The lights still boogie, baby.");
-        return;
-      }
-      const ctx = new AudioCtx();
-      const out = ctx.createGain();
-      out.gain.value = 0.5;
-      out.connect(ctx.destination);
-      ctxRef.current = ctx;
-      stepRef.current = 0;
-      nextTimeRef.current = ctx.currentTime + 0.06;
-      const bpm = 116;
-      const stepDur = 60 / bpm / 4;
-      timerRef.current = window.setInterval(() => {
-        if (!ctxRef.current) return;
-        while (nextTimeRef.current < ctxRef.current.currentTime + 0.12) {
-          scheduleStep(ctxRef.current, out, stepRef.current, nextTimeRef.current);
-          nextTimeRef.current += stepDur;
-          stepRef.current = (stepRef.current + 1) % 16;
-        }
-      }, 25);
-      setPlaying(true);
-      setGrooveMsg("Now groovin' — four on the floor, baby!");
-    } catch {
-      setGrooveMsg("Bummer — the groove wouldn't start. Try again, cool cat.");
-    }
-  }
-
-  return { playing, grooveMsg, toggleGroove };
 }
 
 function useInvalidate() {
@@ -439,7 +316,7 @@ export function App() {
   const [ballPhotoOk, setBallPhotoOk] = useState(true);
   const [boogie, setBoogie] = useState(false);
   const [showThemeSong, setShowThemeSong] = useState(false);
-  const { playing, grooveMsg, toggleGroove } = useDiscoGroove();
+  const [showGrooveSong, setShowGrooveSong] = useState(false);
 
   const addBurn = useMutation({
     mutationFn: (v: ApiRequest<typeof api, "addBurn">) => api.addBurn(v),
@@ -454,6 +331,16 @@ export function App() {
   const s = data?.summary;
   const lowStock = s != null && s.daysLeft != null && data != null && s.daysLeft <= data.settings.lowStockDays;
   const chartMax = data ? Math.max(1, ...data.summary.daily.map((d) => d.bags)) : 1;
+  // The mirror ball shines harder the longer the boogie streak runs:
+  // tier 1 at 7+ days, tier 2 at 14+, tier 3 (full inferno) at 30+.
+  const streakTier = !data ? 0 : data.boogie.currentStreak >= 30 ? 3 : data.boogie.currentStreak >= 14 ? 2 : data.boogie.currentStreak >= 7 ? 1 : 0;
+  const ballGlow = [
+    "0 0 34px rgba(255,210,63,0.45), 0 0 70px rgba(255,46,136,0.3)",
+    "0 0 46px rgba(255,210,63,0.65), 0 0 98px rgba(255,46,136,0.48)",
+    "0 0 58px rgba(255,210,63,0.82), 0 0 128px rgba(255,46,136,0.62), 0 0 64px rgba(0,229,192,0.35)",
+    "0 0 74px rgba(255,210,63,0.98), 0 0 165px rgba(255,46,136,0.78), 0 0 95px rgba(0,229,192,0.5)",
+  ][streakTier] ?? "";
+  const ballHaloOpacity = [0, 0.35, 0.55, 0.85][streakTier] ?? 0;
 
   function submitBurn(e: FormEvent) {
     e.preventDefault();
@@ -471,11 +358,15 @@ export function App() {
         <div className="disco-ball-sway mx-auto w-fit" aria-hidden="true">
           <div className="mx-auto h-8 w-px bg-[#ffd23f]/80" />
           <div className="relative h-[84px] w-[84px] sm:h-[96px] sm:w-[96px]">
+            {/* Streak halo: the ball's aura grows with the boogie streak. */}
+            <div className="absolute -inset-7 rounded-full" aria-hidden="true"
+              style={{ background: "radial-gradient(circle, rgba(255,210,63,0.5) 0%, rgba(255,46,136,0.28) 55%, rgba(255,46,136,0) 72%)", opacity: ballHaloOpacity, transition: "opacity 0.6s ease" }} />
             {/* Drawn CSS ball stays underneath as the fallback. */}
-            <div className="disco-ball absolute inset-0 rounded-full" />
+            <div className="disco-ball absolute inset-0 rounded-full" style={{ boxShadow: ballGlow }} />
             {ballPhotoOk && (
               <img src={discoBallPhoto} alt="" aria-hidden="true" draggable={false}
-                className="absolute inset-0 h-full w-full scale-[1.04] rounded-full object-cover shadow-[0_0_34px_rgba(255,210,63,0.45),0_0_70px_rgba(255,46,136,0.3)]"
+                className="absolute inset-0 h-full w-full scale-[1.04] rounded-full object-cover"
+                style={{ boxShadow: ballGlow }}
                 onError={() => setBallPhotoOk(false)} />
             )}
             {/* Club lights hitting the ball: colored reflections plus a slow
@@ -510,8 +401,8 @@ export function App() {
           <button type="button" aria-pressed={boogie} className={btnGhost} onClick={() => setBoogie((v) => !v)}>
             {boogie ? "💃 Boogie mode: full blast" : "🕺 Boogie mode"}
           </button>
-          <button type="button" aria-pressed={playing} className={btnGhost} onClick={toggleGroove}>
-            <span className="flex items-center gap-2"><Equalizer playing={playing} />{playing ? "Stop the synth groove" : "Play the synth groove"}</span>
+          <button type="button" aria-expanded={showGrooveSong} className={btnGhost} onClick={() => setShowGrooveSong((v) => !v)}>
+            <span className="flex items-center gap-2"><Equalizer playing={showGrooveSong} />{showGrooveSong ? "Hide the groove" : "▶ Play the groove — You Should Be Dancing"}</span>
           </button>
           {me.data?.user && (
             <>
@@ -520,7 +411,36 @@ export function App() {
             </>
           )}
         </div>
-        {grooveMsg && <p role="status" className="mt-2 text-center text-sm text-[#ffe9a8]">{grooveMsg}</p>}
+        {/* Groove song: the real "You Should Be Dancing" by the Bee Gees, streamed from the official video */}
+        {showGrooveSong && (
+          <section aria-label="Groove song: You Should Be Dancing by the Bee Gees" className="mt-4 rounded-2xl border border-[#ff2e88]/50 bg-black/55 p-4 backdrop-blur-sm">
+            <div>
+              <p className="display text-sm font-semibold uppercase tracking-widest text-[#ffd23f]">The groove</p>
+              <p className="display mt-1 text-2xl font-semibold leading-tight">You Should Be Dancing — Bee Gees</p>
+              <p className="mt-1 text-sm text-white/80">The real Bee Gees track, baby — the official music video, streamed right here. Press play inside the video and get down.</p>
+            </div>
+            <div className="mt-3">
+              <div className="overflow-hidden rounded-xl bg-black" style={{ aspectRatio: "16 / 9" }}>
+                <iframe
+                  src={GROOVE_SONG_YOUTUBE_EMBED}
+                  title="You Should Be Dancing by the Bee Gees — official music video"
+                  className="h-full w-full"
+                  sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                  referrerPolicy="no-referrer"
+                  loading="lazy"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <a href={GROOVE_SONG_YOUTUBE} target="_blank" rel="noreferrer" className={btnGhost}>Watch on YouTube</a>
+                <a href={GROOVE_SONG_SPOTIFY} target="_blank" rel="noreferrer" className={btnGhost}>Play on Spotify</a>
+                <a href={GROOVE_SONG_APPLE} target="_blank" rel="noreferrer" className={btnGhost}>Play on Apple Music</a>
+              </div>
+              <p className="mt-2 text-xs text-white/70">If the video won&rsquo;t play inside this view, tap a link above — it opens the real song in your music or video app.</p>
+            </div>
+          </section>
+        )}
         {/* Theme song: the real Stayin' Alive, streamed from the official video */}
         <section aria-label="Theme song: Stayin' Alive by the Bee Gees" className="mt-4 rounded-2xl border border-[#ffd23f]/50 bg-black/55 p-4 backdrop-blur-sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -611,6 +531,12 @@ export function App() {
             </>
           )}
         </section>
+
+        {/* Boogie Board: streaks, badges, stove vs stove, race to spring */}
+        {data && s && <BoogieBoard data={data} />}
+
+        {/* Dance-off board: the opt-in leaderboard, below the Boogie Board */}
+        <DanceOffBoard />
 
         {/* Quick burn log */}
         <section aria-label="Log burned pellets" className="mt-5 rounded-2xl border border-[#7b4fd6]/50 bg-[var(--surface)] p-5 shadow-[0_0_24px_rgba(123,79,214,0.25)] backdrop-blur-sm">
@@ -858,6 +784,193 @@ export function App() {
   );
 }
 
+const BADGE_INFO: { key: string; name: string; icon: string; how: string }[] = [
+  { key: "first_burn", name: "First Burn", icon: "🔥", how: "Log your very first burn to earn it" },
+  { key: "bags_100", name: "100 Bags Club", icon: "💯", how: "Burn 100 bags in total to earn it" },
+  { key: "deep_clean", name: "Deep Clean Disco", icon: "🪩", how: "Log a deep clean as done to earn it" },
+  { key: "week_streak", name: "Week of Boogie", icon: "🕺", how: "Keep a burn streak goin' 7 days straight" },
+  { key: "inferno", name: "Disco Inferno", icon: "🌋", how: "Keep a burn streak goin' 30 days straight — burn, baby, burn!" },
+];
+
+function BoogieBoard({ data }: { data: Data }) {
+  const b = data.boogie;
+  const s = data.summary;
+  const race = b.race;
+  const racePct = race.neededBags != null && race.neededBags > 0 ? Math.min(100, Math.max(0, (s.onHand / race.neededBags) * 100)) : null;
+  const weekName = (id: number | null) => data.stoves.find((st) => st.id === id)?.name ?? "";
+  return (
+    <section aria-label="Boogie Board" className="mt-5 rounded-2xl border border-[#ffd23f]/50 bg-[#1d0b36]/90 p-5 shadow-[0_0_28px_rgba(255,210,63,0.22)] backdrop-blur-sm sm:p-6">
+      <h2 className="disco-font text-2xl text-[#ffd23f] [text-shadow:0_0_14px_rgba(255,46,136,0.6)]">The Boogie Board</h2>
+      <p className="mt-1 text-sm text-white/80">Streaks, badges, a stove showdown, and the race to spring — all earned from your real burns, baby.</p>
+
+      {/* Boogie streaks + title */}
+      <div className="mt-4 rounded-xl border border-[#ff2e88]/40 bg-black/30 p-4">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
+          <div>
+            <p className="display text-5xl font-bold leading-none text-[#ffd23f]">{b.currentStreak}</p>
+            <p className="mt-1 text-sm text-white/80">day boogie streak{b.currentStreak === 1 ? "" : "s"} — and countin&rsquo;</p>
+          </div>
+          <div className="min-w-[140px]">
+            <p className="text-xs uppercase tracking-wide text-white/60">Your title</p>
+            <p className="display text-xl font-semibold text-[#ff9ec6]">{b.title}</p>
+            <p className="text-sm text-white/75">{fmtBags(b.totalBurned)} bags burned all-time, baby</p>
+            <p className="mt-1 text-sm text-white/75">Longest streak: <strong className="text-white">{b.longestStreak} day{b.longestStreak === 1 ? "" : "s"}</strong></p>
+          </div>
+        </div>
+        <p className="mt-3 text-sm text-white/85">
+          {b.currentStreak === 0
+            ? "No streak on the floor right now, cool cat — log a burn today and start the boogie!"
+            : b.currentStreak >= 30
+              ? "DISCO INFERNO! Thirty days and burnin' — the mirror ball is blindin', baby!"
+              : b.currentStreak >= 14
+                ? "Two weeks of pure boogie — that ball is really shinin' now!"
+                : b.currentStreak >= 7
+                  ? "A full week of boogie! Feel that ball glow, baby."
+                  : "Keep loggin' a burn every day — at 7 days the mirror ball starts to glow harder."}
+        </p>
+      </div>
+
+      {/* Badges */}
+      <h3 className="display mt-5 text-lg font-semibold text-[#00e5c0]">Badges — wear &rsquo;em proud</h3>
+      <ul className="mt-2 grid gap-2 sm:grid-cols-2">
+        {BADGE_INFO.map((info) => {
+          const badge = b.badges.find((x) => x.key === info.key);
+          const earned = badge?.earnedDate != null;
+          return (
+            <li key={info.key} className={`flex items-start gap-3 rounded-xl border p-3 ${earned ? "border-[#ffd23f]/60 bg-[#ffd23f]/10" : "border-[var(--border)] bg-black/20 opacity-55"}`}>
+              <span className={`text-3xl ${earned ? "" : "grayscale"}`} aria-hidden="true">{info.icon}</span>
+              <div>
+                <p className="font-semibold">{info.name}</p>
+                {earned
+                  ? <p className="text-sm text-[#ffe9a8]">Earned {fmtDate(badge?.earnedDate ?? null)} — right on!</p>
+                  : <p className="text-sm text-white/75">Not yet, baby — {info.how}.</p>}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
+      {/* Stove vs stove */}
+      <h3 className="display mt-5 text-lg font-semibold text-[#ff9ec6]">Stove vs stove — the big showdown</h3>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        {b.stoveVs.map((v) => (
+          <div key={v.stoveId} className="rounded-xl border border-[#7b4fd6]/50 bg-black/30 p-4">
+            <p className="display text-lg font-semibold">{v.name}</p>
+            {v.hasBurns ? (
+              <dl className="mt-2 space-y-1 text-sm">
+                <div className="flex justify-between"><dt className="text-white/70">Bags burned, all-time</dt><dd className="font-semibold">{fmtBags(v.totalBags)}</dd></div>
+                <div className="flex justify-between"><dt className="text-white/70">Bags a day</dt><dd className="font-semibold">{v.bagsPerDay != null ? fmtBags(v.bagsPerDay) : "—"}</dd></div>
+                <div className="flex justify-between"><dt className="text-white/70">Burned this week</dt><dd className="font-semibold">{fmtBags(v.thisWeekBags)}</dd></div>
+                <div className="flex justify-between"><dt className="text-white/70">Record (W–L)</dt><dd className="font-semibold text-[#ffd23f]">{v.wins}–{v.losses}</dd></div>
+              </dl>
+            ) : (
+              <p className="mt-2 text-sm text-white/75">No burns logged yet — this machine&rsquo;s still waitin&rsquo; for its first dance.</p>
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 rounded-lg bg-white/10 px-3 py-2 text-sm">
+        {b.thisWeek.kind === "winner" && <>🏆 This week&rsquo;s winner: <strong>{weekName(b.thisWeek.stoveId)}</strong> — burnin&rsquo; leaner takes the crown, fewer bags wins the week!</>}
+        {b.thisWeek.kind === "only_one" && <>Only <strong>{weekName(b.thisWeek.stoveId)}</strong> is burnin&rsquo; this week — no head-to-head crown till both machines get down.</>}
+        {b.thisWeek.kind === "tie" && <>Dead heat this week, baby — both stoves burned the same. No crown till somebody pulls ahead!</>}
+        {b.thisWeek.kind === "none" && <>Nobody&rsquo;s burnin&rsquo; yet this week — log a burn and get the showdown started!</>}
+      </p>
+
+      {/* Race to spring */}
+      <h3 className="display mt-5 text-lg font-semibold text-[#ffd23f]">Race to spring — can the stash outlast the season?</h3>
+      <div className="mt-2 rounded-xl border border-[#00e5c0]/40 bg-black/30 p-4">
+        <p className="text-sm text-white/85">Heating season ends <strong>{fmtDate(race.seasonEndDate)}</strong> — change it any time in the plan below, cool cat.</p>
+        <dl className="mt-3 grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
+          <div className="rounded-lg bg-white/10 px-2 py-3"><dt className="text-xs uppercase tracking-wide text-white/70">Bags on hand</dt><dd className="display mt-1 text-xl font-semibold">{fmtBags(s.onHand)}</dd></div>
+          <div className="rounded-lg bg-white/10 px-2 py-3"><dt className="text-xs uppercase tracking-wide text-white/70">Days to spring</dt><dd className="display mt-1 text-xl font-semibold">{race.daysLeft}</dd></div>
+          <div className="rounded-lg bg-white/10 px-2 py-3"><dt className="text-xs uppercase tracking-wide text-white/70">Stash affords / day</dt><dd className="display mt-1 text-xl font-semibold">{race.affordableRate != null ? fmtBags(race.affordableRate) : "—"}</dd></div>
+          <div className="rounded-lg bg-white/10 px-2 py-3"><dt className="text-xs uppercase tracking-wide text-white/70">You&rsquo;re burnin&rsquo; / day</dt><dd className="display mt-1 text-xl font-semibold">{s.burnRate != null ? fmtBags(s.burnRate) : "—"}</dd></div>
+        </dl>
+        {racePct != null && race.neededBags != null && (
+          <div className="mt-3">
+            <div className="h-4 overflow-hidden rounded-full bg-white/15" role="img" aria-label={`Stash covers ${Math.round(racePct)} percent of the bags needed to reach the end of the season`}>
+              <div className="h-full rounded-full bg-gradient-to-r from-[#00e5c0] via-[#ffd23f] to-[#ff2e88]" style={{ width: `${racePct}%` }} />
+            </div>
+            <p className="mt-1 text-xs text-white/70">{fmtBags(s.onHand)} of the {fmtBags(race.neededBags)} bags it takes to boogie all the way to {fmtDate(race.seasonEndDate)}.</p>
+          </div>
+        )}
+        <p className="mt-3 text-sm font-medium">
+          {race.status === "ahead" && <>🟢 You&rsquo;re ahead, baby! The stash covers the whole season with <strong>{fmtBags(race.spareBags ?? 0)} bags to spare</strong> — that&rsquo;s about <strong>{fmtBags(race.cushionDays ?? 0)} extra days</strong> of cushion. Solid!</>}
+          {race.status === "behind" && <>🔴 Runnin&rsquo; behind, cool cat — at this pace the stash goes dry around <strong>{fmtDate(race.runOutDate)}</strong>, about <strong>{fmtBags(race.shortBags ?? 0)} bags short</strong> of spring. Time to score another haul!</>}
+          {race.status === "no_rate" && <>Log some burns, cool cat, and we&rsquo;ll clock your pace against the road to spring.</>}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+type BoardEntry = ApiResponse<typeof api, "getDanceOffBoard">["entries"][number];
+
+function DanceOffBoard() {
+  const me = useMe();
+  const qc = useQueryClient();
+  const boardQ = useQuery({
+    queryKey: ["dance-off-board"],
+    queryFn: () => api.getDanceOffBoard({}),
+    enabled: !!me.data?.user,
+  });
+  const optIn = me.data?.user?.danceOffOptIn ?? false;
+  const toggle = useMutation({
+    mutationFn: (next: boolean) => api.setDanceOffOptIn({ optIn: next }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["me"] });
+      void qc.invalidateQueries({ queryKey: ["dance-off-board"] });
+    },
+  });
+  const board = boardQ.data;
+  const myName = board?.myName ?? null;
+  return (
+    <section aria-label="Dance-off board" className="mt-5 rounded-2xl border border-[#00e5c0]/50 bg-[#1d0b36]/90 p-5 shadow-[0_0_28px_rgba(0,229,192,0.22)] backdrop-blur-sm sm:p-6">
+      <h2 className="disco-font text-2xl text-[#00e5c0] [text-shadow:0_0_14px_rgba(255,46,136,0.6)]">The Dance-Off Board</h2>
+      <p className="mt-1 text-sm text-white/80">Who&rsquo;s burnin&rsquo; leanest on the floor? Lowest bags a day takes the crown — longest streak breaks the tie.</p>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#ffd23f]/40 bg-black/30 p-4">
+        <div>
+          <p className="display text-lg font-semibold text-[#ffd23f]">Join the dance-off</p>
+          <p className="mt-1 text-sm text-white/80">Share only your name, your streak, and your bags a day. Nothing else leaves your account. Turn it off any time and you vanish from the board.</p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={optIn}
+          className={optIn ? "rounded-lg bg-gradient-to-r from-[#ff2e88] via-[#ff6b35] to-[#ffd23f] px-4 py-2.5 font-semibold text-[#1c0b2e]" : btnGhost}
+          disabled={toggle.isPending}
+          onClick={() => toggle.mutate(!optIn)}
+        >
+          {toggle.isPending ? "Hold the groove…" : optIn ? "You're on the floor — tap to step off" : "Join the dance-off"}
+        </button>
+      </div>
+      {toggle.isError && <p role="alert" className="mt-2 text-sm text-[#ff9ec6]">Bummer — the toggle didn&rsquo;t take. Try again, cool cat.</p>}
+      {boardQ.isPending && <p className="mt-4 text-sm text-white/80">Warmin&rsquo; up the dance floor… loadin&rsquo; the board…</p>}
+      {boardQ.isError && <p className="mt-4 text-sm text-white/90">Bummer — couldn&rsquo;t load the board, cool cat. Give it another spin.</p>}
+      {board && (
+        board.entries.length === 0 ? (
+          <p className="mt-4 text-sm text-white/85">Nobody&rsquo;s on the floor yet — be the first to join the dance-off.</p>
+        ) : (
+          <ol className="mt-4 space-y-2">
+            {board.entries.map((e: BoardEntry, i: number) => {
+              const isMe = myName != null && e.name === myName;
+              return (
+                <li key={`${e.name}-${i}`} className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border p-3 ${isMe ? "border-[#ffd23f] bg-[#ffd23f]/15" : "border-[var(--border)] bg-black/20"}`}>
+                  <span className="display w-7 text-center text-xl font-bold text-[#ffd23f]">{i + 1}</span>
+                  <span className="font-semibold">{e.name}</span>
+                  {isMe && <span className="rounded-full bg-[#ffd23f] px-2 py-0.5 text-xs font-bold text-[#1c0b2e]">You</span>}
+                  <span className="ml-auto text-sm text-white/85">🔥 {e.streakDays}-day streak</span>
+                  <span className="text-sm text-white/85">{e.bagsPerDay != null ? `${fmtBags(e.bagsPerDay)} bags a day` : "no burns logged yet"}</span>
+                </li>
+              );
+            })}
+          </ol>
+        )
+      )}
+    </section>
+  );
+}
+
 function TroubleshootingSection({ stove, items }: { stove: Stove; items: Trouble[] }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<"error_code" | "symptom">("error_code");
@@ -984,12 +1097,15 @@ function PlannerForm({ initial, today, summary }: { initial: Data["settings"]; t
   const [windowDays, setWindowDays] = useState(String(initial.burnWindowDays));
   const [lowDays, setLowDays] = useState(String(initial.lowStockDays));
   const [manualRate, setManualRate] = useState(initial.manualBurnRate != null ? String(initial.manualBurnRate) : "");
+  const [seasonMonth, setSeasonMonth] = useState(initial.seasonEnd.slice(0, 2) || "04");
+  const [seasonDay, setSeasonDay] = useState(initial.seasonEnd.slice(3, 5) || "15");
   const [msg, setMsg] = useState("");
   const save = useMutation({
     mutationFn: () => api.updateSettings({
       targetDate: targetDate || null, safetyBags: Number(safety) || 0,
       burnWindowDays: Number(windowDays), lowStockDays: Number(lowDays),
       manualBurnRate: numOrNull(manualRate),
+      seasonEnd: `${seasonMonth.padStart(2, "0")}-${seasonDay.padStart(2, "0")}`,
     }),
     onSuccess: () => { invalidate(); setMsg("Plan saved — right on!"); },
     onError: () => setMsg("Bummer — couldn't save the plan, baby. Try again."),
@@ -1022,6 +1138,16 @@ function PlannerForm({ initial, today, summary }: { initial: Data["settings"]; t
         </Field>
         <Field label="Low-stash boogie warning (days)">
           <input aria-label="Low-stock warning days" type="number" min="0" max="60" className={inputCls} value={lowDays} onChange={(e) => setLowDays(e.target.value)} />
+        </Field>
+        <Field label="Heating season ends — month (race to spring)">
+          <select aria-label="Heating season end month" className={inputCls} value={seasonMonth} onChange={(e) => setSeasonMonth(e.target.value)}>
+            {["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"].map((m, i) => (
+              <option key={m} value={m}>{["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][i]}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Heating season ends — day of the month">
+          <input aria-label="Heating season end day" type="number" min="1" max="31" step="1" className={inputCls} value={seasonDay} onChange={(e) => setSeasonDay(e.target.value)} />
         </Field>
         <div className="col-span-2">
           <Field label="Daily burn rate — leave blank and let your log do the talkin'">
