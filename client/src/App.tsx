@@ -910,8 +910,8 @@ function DanceOffBoard() {
   const me = useMe();
   const qc = useQueryClient();
   const boardQ = useQuery({
-    queryKey: ["dance-off-board"],
-    queryFn: () => api.getDanceOffBoard({}),
+    queryKey: ["dance-off-board", todayLocal()],
+    queryFn: () => api.getDanceOffBoard({ today: todayLocal() }),
     enabled: !!me.data?.user,
   });
   const optIn = me.data?.user?.danceOffOptIn ?? false;

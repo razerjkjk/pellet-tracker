@@ -390,18 +390,18 @@ export const Actions = {
 
   getDanceOffBoard: defineAction({
     description: "Returns the dance-off board: every opted-in account's display name, current boogie streak, and bags burned per day, ranked by lowest bags a day. No emails, purchases, stove names, or burn detail.",
-    request: z.object({}),
+    request: z.object({ today: dateString }),
     response: z.object({
       ok: z.boolean(),
       entries: z.array(z.object({ name: z.string(), streakDays: z.number().int(), bagsPerDay: z.number().nullable() })),
       myName: z.string().nullable(),
     }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const user = requireUser(ctx);
       const db = ctx.db;
-      // The board ranks by the server's calendar day, so every dancer is
-      // measured on the same clock.
-      const today = new Date().toISOString().slice(0, 10);
+      // The board uses the caller's local date (same as the Boogie Board),
+      // so a dancer's streak matches on both boards.
+      const today = args.today;
       const optedIn = await db
         .select({ id: schema.users.id, name: schema.users.name })
         .from(schema.users)
